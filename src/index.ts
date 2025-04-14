@@ -2,27 +2,23 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-  ListToolsRequestSchema,
   CallToolRequestSchema,
   ErrorCode,
-  McpError
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import dotenv from "dotenv";
 import {
-  isSearchProductArgs,
-  isGetProductByIdArgs,
-  isComparePricesArgs
-} from "./types.js";
-import {
-  searchProducts,
+  compareProductPrices,
   getProductById,
-  compareProductPrices
+  searchProducts
 } from "./api.js";
-
-// .env dosyasından yapılandırmayı yükle
-dotenv.config();
+import {
+  isComparePricesArgs,
+  isGetProductByIdArgs,
+  isSearchProductArgs
+} from "./types.js";
 
 class MarketFiyatiServer {
   private server: Server;
@@ -103,12 +99,12 @@ class MarketFiyatiServer {
       ReadResourceRequestSchema,
       async (request) => {
         const uri = request.params.uri;
-        
+
         // Arama sonuçları için
         if (uri.startsWith("market-fiyati://search/")) {
           const encodedQuery = uri.replace("market-fiyati://search/", "");
           const query = decodeURIComponent(encodedQuery);
-          
+
           try {
             // Önbellekten kontrol et
             let searchResult;
@@ -118,13 +114,13 @@ class MarketFiyatiServer {
               searchResult = await searchProducts(query);
               // Önbelleğe ekle (basit bir önbellek mekanizması)
               this.searchCache.set(query, searchResult);
-              
+
               // Önbelleği 5 dakika sonra temizle
               setTimeout(() => {
                 this.searchCache.delete(query);
               }, 5 * 60 * 1000);
             }
-            
+
             return {
               contents: [{
                 uri: request.params.uri,
@@ -139,21 +135,21 @@ class MarketFiyatiServer {
             );
           }
         }
-        
+
         // Ürün detayları için
         if (uri.startsWith("market-fiyati://product/")) {
           const productId = uri.replace("market-fiyati://product/", "");
-          
+
           try {
             const product = await getProductById(productId);
-            
+
             if (!product) {
               throw new McpError(
                 ErrorCode.MethodNotFound,
                 `Ürün bulunamadı: ${productId}`
               );
             }
-            
+
             return {
               contents: [{
                 uri: request.params.uri,
@@ -168,7 +164,7 @@ class MarketFiyatiServer {
             );
           }
         }
-        
+
         throw new McpError(
           ErrorCode.InvalidRequest,
           `Desteklenmeyen kaynak: ${uri}`
@@ -228,6 +224,33 @@ class MarketFiyatiServer {
               },
               required: ["productId"]
             }
+          },
+          {
+            name: "find_nearest_markets",
+            description: "Konuma göre en yakın marketleri bulur",
+            inputSchema: {
+              type: "object",
+              properties: {
+                latitude: { type: "number", description: "Enlem" },
+                longitude: { type: "number", description: "Boylam" },
+                distance: { type: "number", description: "Arama mesafesi (km)" }
+              },
+              required: ["latitude", "longitude"]
+            }
+          },
+          {
+            name: "search_nearby",
+            description: "Konuma göre ürün araması yapar",
+            inputSchema: {
+              type: "object",
+              properties: {
+                latitude: { type: "number", description: "Enlem" },
+                longitude: { type: "number", description: "Boylam" },
+                query: { type: "string", description: "Arama sorgusu" },
+                distance: { type: "number", description: "Arama mesafesi (km)" }
+              },
+              required: ["latitude", "longitude", "query"]
+            }
           }
         ]
       })
@@ -268,7 +291,7 @@ class MarketFiyatiServer {
             }
 
             const product = await getProductById(args.productId);
-            
+
             if (!product) {
               return {
                 content: [{
@@ -278,7 +301,7 @@ class MarketFiyatiServer {
                 isError: true
               };
             }
-            
+
             return {
               content: [{
                 type: "text",
@@ -297,13 +320,47 @@ class MarketFiyatiServer {
             }
 
             const comparisonResult = await compareProductPrices(args.productId, args.market);
-            
+
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify(comparisonResult, null, 2)
               }]
             };
+          }
+
+          // En yakın marketleri bulma
+          if (name === "find_nearest_markets") {
+            const { latitude, longitude, distance } = args as Record<string, unknown>;
+
+            if (typeof latitude !== "number" || typeof longitude !== "number" || (distance !== undefined && typeof distance !== "number")) {
+              throw new McpError(ErrorCode.InvalidParams, "Geçersiz parametreler: latitude, longitude ve distance sayısal olmalıdır.");
+            }
+
+            const response = await fetch("https://api.marketfiyati.org.tr/api/v2/nearest", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ latitude, longitude, distance })
+            });
+            const data = await response.json();
+            return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+          }
+
+          // Konuma göre ürün araması yapma
+          if (name === "search_nearby") {
+            const { latitude, longitude, query, distance } = args as Record<string, unknown>;
+
+            if (typeof latitude !== "number" || typeof longitude !== "number" || typeof query !== "string" || (distance !== undefined && typeof distance !== "number")) {
+              throw new McpError(ErrorCode.InvalidParams, "Geçersiz parametreler: latitude, longitude sayısal, query metinsel ve distance opsiyonel olarak sayısal olmalıdır.");
+            }
+
+            const response = await fetch("https://api.marketfiyati.org.tr/api/v2/search", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ latitude, longitude, keywords: query, distance })
+            });
+            const data = await response.json();
+            return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
           }
 
           throw new McpError(
@@ -314,7 +371,7 @@ class MarketFiyatiServer {
           if (error instanceof McpError) {
             throw error;
           }
-          
+
           return {
             content: [{
               type: "text",
@@ -330,7 +387,7 @@ class MarketFiyatiServer {
   async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    
+
     // Bilgi mesajını stderr'e yazdır (stdout MCP protokolü için kullanılıyor)
     console.error("Market Fiyatı MCP sunucusu başlatıldı (stdio üzerinden çalışıyor)");
   }
